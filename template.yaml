@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Sonarqube test stack
+
+Globals:
+  Function:
+    Timeout: 3
+    MemorySize: 128
+    Runtime: nodejs18.x
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Description: Application name
+  StackName:
+    Type: String
+    Description: Stack (client name)
+  StackEnvironment:
+    Type: String
+    Description: Environment da stack (dev, staging or prod)
+    Default: "dev"
+  AuthorizerArn:
+    Type: String
+    Description: Cognito authorizer ARN
+  DefaultWebACLArn:
+    Type: String
+    Description: WebACL ARN
+    Default: ""
+  ApiGatewayDomainName:
+    Type: String
+    Description: Api gateway domain name
+    Default: ""
+  ApiGatewayCertificateArn:
+    Type: String
+    Description: Api gateway certificate ARN
+    Default: ""
+  ApiGatewayHostedZoneId:
+    Type: String
+    Description: API Gateway hosted zone id
+    Default: ""
+
+Conditions:
+  IsStackNameEmpty:  !Equals [!Ref "StackName", ""]
+
+Resources:
+  TestV1ApiMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    DependsOn: TestApiGatewayApiDomainName
+    Properties:
+      ApiId: !Ref TestApiGatewayApi
+      ApiMappingKey: public
+      DomainName: !Ref ApiGatewayDomainName
+      Stage: !Ref StackEnvironment
+
+  TestApiGatewayApiDomainName:
+    Type: 'AWS::ApiGatewayV2::DomainName'
+    DependsOn: TestApiGatewayApiStage
+    Properties:
+      DomainName: !Ref ApiGatewayDomainName
+      DomainNameConfigurations:
+        - EndpointType: REGIONAL
+          CertificateArn: !Ref ApiGatewayCertificateArn
+          SecurityPolicy: TLS_1_2
+
+  DomainRecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Ref ApiGatewayDomainName
+      HostedZoneId: !Ref ApiGatewayHostedZoneId
+      AliasTarget:
+        DNSName: !GetAtt TestApiGatewayApiDomainName.RegionalDomainName
+        HostedZoneId: !GetAtt TestApiGatewayApiDomainName.RegionalHostedZoneId
+      Type: A
+
+  TestApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StackEnvironment
+      Auth:
+        Authorizers:
+          TestUsersAuthorizer:
+            UserPoolArn: !Ref AuthorizerArn
+      DisableExecuteApiEndpoint: True
+      Cors:
+        AllowMethods: "'POST, GET, PATCH, PUT'"
+        AllowHeaders: "'X-Forwarded-For, Authorization, content-type'"
+        MaxAge: "'600'"
+      AccessLogSetting:
+        DestinationArn: !GetAtt TestApiGatewayApiLogGroup.Arn
+        Format: $context.extendedRequestId $context.identity.sourceIp $context.identity.caller $context.identity.user [$context.requestTime] "$context.httpMethod $context.resourcePath $context.protocol" $context.status $context.responseLength $context.requestId
+      Tags:
+        "application:name": !If [ IsStackNameEmpty, !Join [ "-", [ !Ref ApplicationName, !Ref StackEnvironment ] ], !Join [ "-", [ !Ref ApplicationName, !Ref StackName, !Ref StackEnvironment ] ] ]
+        "application:resource": !If [ IsStackNameEmpty, !Join [ "-", [ !Ref ApplicationName, !Ref StackEnvironment, "TestApiGatewayApi" ] ], !Join [ "-", [ !Ref ApplicationName, !Ref StackName, !Ref StackEnvironment, "TestApiGatewayApi" ] ] ]
+  TestApiGatewayApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${TestApiGatewayApi}'
+      RetentionInDays: 120
+      Tags:
+        - Key: "application:name"
+          Value: !If [ IsStackNameEmpty, !Join [ "-", [ !Ref ApplicationName, !Ref StackEnvironment ] ], !Join [ "-", [ !Ref ApplicationName, !Ref StackName, !Ref StackEnvironment ] ] ]
+        - Key: "application:resource"
+          Value: !If [ IsStackNameEmpty, !Join [ "-", [ !Ref ApplicationName, !Ref StackEnvironment, "TestApiGatewayApiLogGroup" ] ], !Join [ "-", [ !Ref ApplicationName, !Ref StackName, !Ref StackEnvironment, "TestApiGatewayApiLogGroup" ] ] ]
+
+  TestDefaultWebACLAssociation:
+    Type: 'AWS::WAFv2::WebACLAssociation'
+    DependsOn: TestApiGatewayApiStage
+    Properties:
+      WebACLArn: !Ref DefaultWebACLArn
+      ResourceArn:
+        Fn::Join:
+        - ''
+        - - 'arn:'
+          - !Ref AWS::Partition
+          - ":apigateway:"
+          - !Ref AWS::Region
+          - "::/restapis/"
+          - !Ref TestApiGatewayApi
+          - "/stages/"
+          - !Ref StackEnvironment
+
+  DummyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: |
+        Função sem função.
+      CodeUri: lambda/dist
+      Handler: dummy.dummyHandler
+      Timeout: 3
+      Architectures:
+        - x86_64
+      Events:
+        DummyFunctionEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TestApiGatewayApi
+            Path: /v1/dummy
+            Method: get
+            Auth:
+              Authorizer: TestUsersAuthorizer
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref PrivateApiSecurityGroupId
+        SubnetIds:
+          - !Ref PrivateApiSubnetID1
+          - !Ref PrivateApiSubnetID2
+  DummyFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${DummyFunction}'
+      RetentionInDays: 1
+      Tags:
+        - Key: "application:name"
+          Value: !If [ IsStackNameEmpty, !Join [ "-", [ !Ref ApplicationName, !Ref StackEnvironment ] ], !Join [ "-", [ !Ref ApplicationName, !Ref StackName, !Ref StackEnvironment ] ] ]
+        - Key: "application:resource"
+          Value: !If [ IsStackNameEmpty, !Join [ "-", [ !Ref ApplicationName, !Ref StackEnvironment, "DummyFunctionLogGroup" ] ], !Join [ "-", [ !Ref ApplicationName, !Ref StackName, !Ref StackEnvironment, "DummyFunctionLogGroup" ] ] ]
