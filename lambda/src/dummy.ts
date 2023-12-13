@@ -51,7 +51,7 @@ export const dummyHandler = async (
   const result = await postRequest({});
   console.log('obteve resposta')
   return {
-    "statusCode": 200,
+    "statusCode": 201,
     body: JSON.stringify(result)    
   };
 }
